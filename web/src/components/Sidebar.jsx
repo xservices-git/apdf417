@@ -32,11 +32,6 @@ export default function Sidebar({ tabs, active, onSelect }) {
           )
         })}
       </nav>
-      <div className="mt-auto p-3 rounded-lg border border-zinc-800/60 bg-zinc-900/40 text-xs text-zinc-500 leading-relaxed">
-        PDF417.PRO API Proxy<br />
-        Auto failover across tokens<br />
-        Cloudflare Worker backend
-      </div>
     </aside>
   )
 }
