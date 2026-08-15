@@ -105,7 +105,14 @@ export default {
     }
 
     try {
-      // 1. Auth: Login
+      // 0. Debug: echo env (temporary)
+      if (path === '/__debug' && request.method === 'GET') {
+        return json({
+          has_admin_user: !!env.ADMIN_USER,
+          has_admin_pass: !!env.ADMIN_PASS,
+          admin_user: env.ADMIN_USER || null
+        });
+      }
       if (path === '/api/auth/login' && request.method === 'POST') {
         const body = await request.json();
         const store = await getStore(env);
