@@ -3,21 +3,10 @@ main = "worker/index.js"
 compatibility_date = "2025-01-01"
 compatibility_flags = ["nodejs_compat"]
 
-# KV namespace for storing admin creds + API tokens.
-# Create it with: wrangler kv:namespace create APDF417_KV
-# then paste the id below.
-[[kv_namespaces]]
-binding = "APDF417_KV"
-id = "REPLACE_WITH_KV_ID"
-
-# Default admin credentials used on first boot (overridden by KV).
-[vars]
-ADMIN_USER = "admin"
-ADMIN_PASS = "changeme"
-
-# Public URL of the deployed worker (for CORS + serving web build).
-PUBLIC_URL = "https://apdf417.yourdomain.workers.dev"
-
 [assets]
 directory = "./web/dist"
 binding = "ASSETS"
+
+# Bindings + secrets cấu hình trên Cloudflare Dashboard (GUI):
+#  - Settings -> Functions -> KV Namespace Bindings: APDF417_KV
+#  - Settings -> Variables and Secrets: ADMIN_USER, ADMIN_PASS, PUBLIC_URL (nếu cần)
