@@ -64,11 +64,13 @@ async function checkAuth(req, env) {
   
   // JWT-like simple session validation or token match
   const store = await getStore(env);
-  const adminHash = store.admin?.passwordHash || DEFAULT_CONFIG.admin.passwordHash;
+  const adminHash = env.ADMIN_PASS
+    ? await sha256(env.ADMIN_PASS)
+    : (store.admin?.passwordHash || DEFAULT_CONFIG.admin.passwordHash);
   const expectedToken = await sha256(`session:${adminHash}`);
   
   if (token === expectedToken) {
-    return { username: store.admin?.username || 'admin' };
+    return { username: env.ADMIN_USER || store.admin?.username || 'admin' };
   }
   return null;
 }
@@ -107,8 +109,10 @@ export default {
       if (path === '/api/auth/login' && request.method === 'POST') {
         const body = await request.json();
         const store = await getStore(env);
-        const adminUser = store.admin?.username || 'admin';
-        const adminHash = store.admin?.passwordHash || DEFAULT_CONFIG.admin.passwordHash;
+        const adminUser = env.ADMIN_USER || store.admin?.username || 'admin';
+        const adminHash = env.ADMIN_PASS
+          ? await sha256(env.ADMIN_PASS)
+          : (store.admin?.passwordHash || DEFAULT_CONFIG.admin.passwordHash);
         const inputHash = await sha256(body.password || '');
 
         if (body.username === adminUser && inputHash === adminHash) {
