@@ -7,7 +7,8 @@ import Generator from './pages/Generator'
 import TokensManager from './pages/TokensManager'
 import Settings from './pages/Settings'
 import Dashboard from './pages/Dashboard'
-import { LayoutDashboard, ScanLine, KeyRound, Settings as SettingsIcon } from 'lucide-react'
+import History from './pages/History'
+import { LayoutDashboard, ScanLine, KeyRound, Settings as SettingsIcon, History as HistoryIcon } from 'lucide-react'
 
 export default function App() {
   const [authed, setAuthed] = useState(false)
@@ -63,6 +64,7 @@ export default function App() {
   const tabs = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
     { id: 'generator', label: 'Barcode Generator', icon: ScanLine },
+    { id: 'history', label: 'Lịch sử', icon: HistoryIcon },
     { id: 'tokens', label: 'API Tokens', icon: KeyRound },
     { id: 'settings', label: 'Settings', icon: SettingsIcon }
   ]
@@ -75,6 +77,7 @@ export default function App() {
         <main className="flex-1 overflow-y-auto p-4 md:p-6">
           {activeTab === 'dashboard' && <Dashboard onNavigate={setActiveTab} />}
           {activeTab === 'generator' && <Generator />}
+          {activeTab === 'history' && <History />}
           {activeTab === 'tokens' && <TokensManager />}
           {activeTab === 'settings' && <Settings user={user} onUpdateUser={setUser} onLogout={handleLogout} />}
         </main>

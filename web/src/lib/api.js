@@ -54,5 +54,8 @@ export const api = {
 
   getStates: () => request('/pdf417/states'),
   getFields: (state, type = 'full') => request(`/pdf417/fields?state=${encodeURIComponent(state)}&type=${type}`),
-  generateBarcode: (payload) => request('/pdf417/generate', { method: 'POST', body: JSON.stringify(payload) })
+  generateBarcode: (payload) => request('/pdf417/generate', { method: 'POST', body: JSON.stringify(payload) }),
+
+  getHistory: () => request('/history'),
+  clearHistory: () => request('/history', { method: 'DELETE' })
 };

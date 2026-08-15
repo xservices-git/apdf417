@@ -37,6 +37,26 @@ async function saveStore(env, store) {
   // For in-memory fallback, store is already a reference to globalThis.__APDF417_STORE__
 }
 
+const HISTORY_MAX = 100;
+
+async function getHistory(env) {
+  if (env.APDF417_KV) {
+    const raw = await env.APDF417_KV.get('history', 'json');
+    if (raw) return raw;
+  }
+  if (!globalThis.__APDF417_HISTORY__) {
+    globalThis.__APDF417_HISTORY__ = [];
+  }
+  return globalThis.__APDF417_HISTORY__;
+}
+
+async function saveHistory(env, history) {
+  if (env.APDF417_KV) {
+    await env.APDF417_KV.put('history', JSON.stringify(history));
+  }
+  // In-memory: history is already a reference to globalThis.__APDF417_HISTORY__
+}
+
 async function checkAuth(req, env) {
   const auth = req.headers.get('Authorization');
   if (!auth || !auth.startsWith('Bearer ')) return null;
@@ -136,6 +156,20 @@ export default {
       if (path.startsWith('/api/')) {
         const user = await checkAuth(request, env);
         if (!user) return json({ error: 'Unauthorized' }, 401);
+      }
+
+      // History Endpoints
+      if (path === '/api/history' && request.method === 'GET') {
+        const history = await getHistory(env);
+        return json({ history });
+      }
+
+      if (path === '/api/history' && request.method === 'DELETE') {
+        if (env.APDF417_KV) {
+          await env.APDF417_KV.put('history', JSON.stringify([]));
+        }
+        globalThis.__APDF417_HISTORY__ = [];
+        return json({ success: true, history: [] });
       }
 
       // 4. Token Management
@@ -327,6 +361,29 @@ export default {
                 if (tokItem.info.available_barcodes > 0) tokItem.info.available_barcodes -= 1;
                 await saveStore(env, store);
               }
+
+              // Append to history
+              try {
+                const history = await getHistory(env);
+                history.unshift({
+                  id: 'hist_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 6),
+                  createdAt: new Date().toISOString(),
+                  tokenId: tokItem.id,
+                  tokenName: tokItem.name,
+                  state: reqBody.state || null,
+                  barcodeType: reqBody.barcode_type || null,
+                  pdf417Meta: reqBody.meta || null,
+                  pdf417Data: reqBody.data || null,
+                  pngUrl: data.png || null,
+                  svgUrl: data.svg || null,
+                  rawResponse: data
+                });
+                if (history.length > HISTORY_MAX) history.length = HISTORY_MAX;
+                await saveHistory(env, history);
+              } catch (e) {
+                // history failure should not block success response
+              }
+
               return json({
                 ...data,
                 used_token: { id: tokItem.id, name: tokItem.name }
