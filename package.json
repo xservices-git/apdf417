@@ -1,0 +1,17 @@
+{
+  "name": "apdf417",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:worker\" \"npm run dev:web\"",
+    "dev:worker": "wrangler dev worker/index.js --port 8787",
+    "dev:web": "cd web && npm run dev",
+    "build": "cd web && npm run build",
+    "deploy": "wrangler deploy worker/index.js"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "wrangler": "^3.111.0"
+  }
+}
