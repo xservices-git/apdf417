@@ -57,20 +57,38 @@ async function saveHistory(env, history) {
   // In-memory: history is already a reference to globalThis.__APDF417_HISTORY__
 }
 
+// Resolve admin creds with priority: KV (custom) > env (seed) > default (dev only)
+// Pattern: env seeds once; once user changes password via web GUI, KV takes over.
+async function getAdminCreds(env) {
+  const store = await getStore(env);
+  if (store.admin?.passwordHash) {
+    return {
+      username: store.admin.username || env.ADMIN_USER || 'admin',
+      passwordHash: store.admin.passwordHash
+    };
+  }
+  if (env.ADMIN_PASS) {
+    return {
+      username: env.ADMIN_USER || 'admin',
+      passwordHash: await sha256(env.ADMIN_PASS)
+    };
+  }
+  return {
+    username: 'admin',
+    passwordHash: DEFAULT_CONFIG.admin.passwordHash
+  };
+}
+
 async function checkAuth(req, env) {
   const auth = req.headers.get('Authorization');
   if (!auth || !auth.startsWith('Bearer ')) return null;
   const token = auth.slice(7);
-  
-  // JWT-like simple session validation or token match
-  const store = await getStore(env);
-  const adminHash = env.ADMIN_PASS
-    ? await sha256(env.ADMIN_PASS)
-    : (store.admin?.passwordHash || DEFAULT_CONFIG.admin.passwordHash);
-  const expectedToken = await sha256(`session:${adminHash}`);
-  
+
+  const { username, passwordHash } = await getAdminCreds(env);
+  const expectedToken = await sha256(`session:${passwordHash}`);
+
   if (token === expectedToken) {
-    return { username: env.ADMIN_USER || store.admin?.username || 'admin' };
+    return { username };
   }
   return null;
 }
@@ -115,16 +133,11 @@ export default {
       }
       if (path === '/api/auth/login' && request.method === 'POST') {
         const body = await request.json();
-        const store = await getStore(env);
-        const adminUser = env.ADMIN_USER || store.admin?.username || 'admin';
-        const adminHash = env.ADMIN_PASS
-          ? await sha256(env.ADMIN_PASS)
-          : (store.admin?.passwordHash || DEFAULT_CONFIG.admin.passwordHash);
+        const { username, passwordHash } = await getAdminCreds(env);
         const inputHash = await sha256(body.password || '');
-
-        if (body.username === adminUser && inputHash === adminHash) {
-          const sessionToken = await sha256(`session:${adminHash}`);
-          return json({ success: true, token: sessionToken, username: adminUser });
+        if (body.username === username && inputHash === passwordHash) {
+          const sessionToken = await sha256(`session:${passwordHash}`);
+          return json({ success: true, token: sessionToken, username });
         }
         return json({ error: 'Invalid username or password' }, 401);
       }
@@ -140,7 +153,7 @@ export default {
         }
 
         const store = await getStore(env);
-        const currentHash = store.admin?.passwordHash || DEFAULT_CONFIG.admin.passwordHash;
+        const { passwordHash: currentHash } = await getAdminCreds(env);
         const oldHash = await sha256(body.oldPassword || '');
 
         if (oldHash !== currentHash) {
