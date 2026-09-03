@@ -7,6 +7,7 @@ compatibility_flags = ["nodejs_compat"]
 directory = "./web/dist"
 binding = "ASSETS"
 
-# Bindings + secrets cấu hình trên Cloudflare Dashboard (GUI):
-#  - Settings -> Functions -> KV Namespace Bindings: APDF417_KV
-#  - Settings -> Variables and Secrets: ADMIN_USER, ADMIN_PASS, PUBLIC_URL (nếu cần)
+[[d1_databases]]
+binding = "DB"
+database_name = "apdf147"
+database_id = "9f7768ee-1430-46ec-b1de-a10b07d6795e"

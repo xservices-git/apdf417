@@ -1,16 +1,15 @@
 // Cloudflare Worker backend for APDF417
-// Routes: Auth, Token Manager, PDF417 API proxy
+// Routes: Auth, Token Manager, PDF417 API proxy with Cloudflare D1 SQL storage
 
 const UPSTREAM_BASE = 'https://pdf417.pro';
+const HISTORY_MAX = 100;
 
 const DEFAULT_CONFIG = {
   admin: {
     username: 'admin',
     passwordHash: '8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918' // SHA-256 of 'admin'
   },
-  tokens: [
-    // { id: string, name: string, token: string, active: boolean, info: object, lastCheck: string }
-  ]
+  tokens: []
 };
 
 async function sha256(str) {
@@ -18,28 +17,143 @@ async function sha256(str) {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Ensure tables exist in D1
+async function getDb(env) {
+  const db = env.DB || env.apdf147;
+  if (!db) return null;
+
+  if (!globalThis.__D1_INITIALIZED__) {
+    await db.exec(`
+      CREATE TABLE IF NOT EXISTS config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS tokens (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        token TEXT NOT NULL,
+        active INTEGER DEFAULT 0,
+        info TEXT,
+        last_check TEXT,
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS history (
+        id TEXT PRIMARY KEY,
+        created_at TEXT NOT NULL,
+        token_id TEXT,
+        token_name TEXT,
+        state TEXT,
+        barcode_type TEXT,
+        pdf417_meta TEXT,
+        pdf417_data TEXT,
+        png_url TEXT,
+        svg_url TEXT,
+        raw_response TEXT
+      );
+    `);
+    globalThis.__D1_INITIALIZED__ = true;
+  }
+  return db;
+}
+
+// Storage helpers
 async function getStore(env) {
+  const db = await getDb(env);
+  if (db) {
+    const adminRow = await db.prepare("SELECT value FROM config WHERE key = 'admin'").first();
+    let admin = adminRow ? JSON.parse(adminRow.value) : null;
+
+    const tokenRows = await db.prepare("SELECT * FROM tokens ORDER BY created_at ASC").all();
+    const tokens = (tokenRows?.results || []).map(r => ({
+      id: r.id,
+      name: r.name,
+      token: r.token,
+      active: Boolean(r.active),
+      info: r.info ? JSON.parse(r.info) : null,
+      lastCheck: r.last_check,
+      createdAt: r.created_at
+    }));
+
+    return {
+      admin: admin || DEFAULT_CONFIG.admin,
+      tokens
+    };
+  }
+
+  // Fallback to KV if available
   if (env.APDF417_KV) {
     const raw = await env.APDF417_KV.get('config', 'json');
     if (raw) return raw;
   }
-  // In-memory fallback (per-isolate; survives within same isolate, lost on cold start)
+
+  // In-memory fallback
   if (!globalThis.__APDF417_STORE__) {
     globalThis.__APDF417_STORE__ = JSON.parse(JSON.stringify(DEFAULT_CONFIG));
   }
   return globalThis.__APDF417_STORE__;
 }
 
-async function saveStore(env, store) {
+async function saveAdminConfig(env, admin) {
+  const db = await getDb(env);
+  if (db) {
+    await db.prepare("INSERT OR REPLACE INTO config (key, value) VALUES ('admin', ?)").bind(JSON.stringify(admin)).run();
+    return;
+  }
+  const store = await getStore(env);
+  store.admin = admin;
   if (env.APDF417_KV) {
     await env.APDF417_KV.put('config', JSON.stringify(store));
   }
-  // For in-memory fallback, store is already a reference to globalThis.__APDF417_STORE__
 }
 
-const HISTORY_MAX = 100;
+async function saveTokens(env, tokens) {
+  const db = await getDb(env);
+  if (db) {
+    await db.exec("DELETE FROM tokens");
+    if (tokens && tokens.length > 0) {
+      const stmt = db.prepare(`
+        INSERT INTO tokens (id, name, token, active, info, last_check, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+      const batch = tokens.map(t => stmt.bind(
+        t.id,
+        t.name,
+        t.token,
+        t.active ? 1 : 0,
+        t.info ? JSON.stringify(t.info) : null,
+        t.lastCheck || null,
+        t.createdAt || new Date().toISOString()
+      ));
+      await db.batch(batch);
+    }
+    return;
+  }
+  const store = await getStore(env);
+  store.tokens = tokens;
+  if (env.APDF417_KV) {
+    await env.APDF417_KV.put('config', JSON.stringify(store));
+  }
+}
 
 async function getHistory(env) {
+  const db = await getDb(env);
+  if (db) {
+    const { results } = await db.prepare("SELECT * FROM history ORDER BY created_at DESC LIMIT ?").bind(HISTORY_MAX).all();
+    return (results || []).map(r => ({
+      id: r.id,
+      createdAt: r.created_at,
+      tokenId: r.token_id,
+      tokenName: r.token_name,
+      state: r.state,
+      barcodeType: r.barcode_type,
+      pdf417Meta: r.pdf417_meta ? JSON.parse(r.pdf417_meta) : null,
+      pdf417Data: r.pdf417_data ? JSON.parse(r.pdf417_data) : null,
+      pngUrl: r.png_url,
+      svgUrl: r.svg_url,
+      rawResponse: r.raw_response ? JSON.parse(r.raw_response) : null
+    }));
+  }
+
   if (env.APDF417_KV) {
     const raw = await env.APDF417_KV.get('history', 'json');
     if (raw) return raw;
@@ -50,15 +164,56 @@ async function getHistory(env) {
   return globalThis.__APDF417_HISTORY__;
 }
 
-async function saveHistory(env, history) {
+async function addHistoryItem(env, item) {
+  const db = await getDb(env);
+  if (db) {
+    await db.prepare(`
+      INSERT INTO history (id, created_at, token_id, token_name, state, barcode_type, pdf417_meta, pdf417_data, png_url, svg_url, raw_response)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).bind(
+      item.id,
+      item.createdAt,
+      item.tokenId || null,
+      item.tokenName || null,
+      item.state || null,
+      item.barcodeType || null,
+      item.pdf417Meta ? JSON.stringify(item.pdf417Meta) : null,
+      item.pdf417Data ? JSON.stringify(item.pdf417Data) : null,
+      item.pngUrl || null,
+      item.svgUrl || null,
+      item.rawResponse ? JSON.stringify(item.rawResponse) : null
+    ).run();
+
+    // Clean old history beyond HISTORY_MAX
+    await db.prepare(`
+      DELETE FROM history WHERE id NOT IN (
+        SELECT id FROM history ORDER BY created_at DESC LIMIT ?
+      )
+    `).bind(HISTORY_MAX).run();
+    return;
+  }
+
+  const history = await getHistory(env);
+  history.unshift(item);
+  if (history.length > HISTORY_MAX) history.length = HISTORY_MAX;
   if (env.APDF417_KV) {
     await env.APDF417_KV.put('history', JSON.stringify(history));
   }
-  // In-memory: history is already a reference to globalThis.__APDF417_HISTORY__
 }
 
-// Resolve admin creds with priority: KV (custom) > env (seed) > default (dev only)
-// Pattern: env seeds once; once user changes password via web GUI, KV takes over.
+async function clearHistory(env) {
+  const db = await getDb(env);
+  if (db) {
+    await db.exec("DELETE FROM history");
+    return;
+  }
+  if (env.APDF417_KV) {
+    await env.APDF417_KV.put('history', JSON.stringify([]));
+  }
+  globalThis.__APDF417_HISTORY__ = [];
+}
+
+// Resolve admin creds with priority: DB > env > default
 async function getAdminCreds(env) {
   const store = await getStore(env);
   if (store.admin?.passwordHash) {
@@ -123,14 +278,7 @@ export default {
     }
 
     try {
-      // 0. Debug: echo env (temporary)
-      if (path === '/__debug' && request.method === 'GET') {
-        return json({
-          has_admin_user: !!env.ADMIN_USER,
-          has_admin_pass: !!env.ADMIN_PASS,
-          admin_user: env.ADMIN_USER || null
-        });
-      }
+      // 1. Auth: Login
       if (path === '/api/auth/login' && request.method === 'POST') {
         const body = await request.json();
         const { username, passwordHash } = await getAdminCreds(env);
@@ -152,7 +300,6 @@ export default {
           return json({ error: 'Password must be at least 4 characters' }, 400);
         }
 
-        const store = await getStore(env);
         const { passwordHash: currentHash } = await getAdminCreds(env);
         const oldHash = await sha256(body.oldPassword || '');
 
@@ -160,12 +307,13 @@ export default {
           return json({ error: 'Current password incorrect' }, 400);
         }
 
-        store.admin = store.admin || {};
-        if (body.newUsername) store.admin.username = body.newUsername;
-        store.admin.passwordHash = await sha256(body.newPassword);
-        await saveStore(env, store);
+        const newAdmin = {
+          username: body.newUsername || user.username || 'admin',
+          passwordHash: await sha256(body.newPassword)
+        };
+        await saveAdminConfig(env, newAdmin);
 
-        const newSessionToken = await sha256(`session:${store.admin.passwordHash}`);
+        const newSessionToken = await sha256(`session:${newAdmin.passwordHash}`);
         return json({ success: true, token: newSessionToken, message: 'Password changed successfully' });
       }
 
@@ -189,10 +337,7 @@ export default {
       }
 
       if (path === '/api/history' && request.method === 'DELETE') {
-        if (env.APDF417_KV) {
-          await env.APDF417_KV.put('history', JSON.stringify([]));
-        }
-        globalThis.__APDF417_HISTORY__ = [];
+        await clearHistory(env);
         return json({ success: true, history: [] });
       }
 
@@ -207,13 +352,13 @@ export default {
         if (!body.token) return json({ error: 'Token is required' }, 400);
 
         const store = await getStore(env);
-        store.tokens = store.tokens || [];
+        const tokens = store.tokens || [];
 
         const newToken = {
           id: 'tok_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 6),
-          name: body.name || 'API Token ' + (store.tokens.length + 1),
+          name: body.name || 'API Token ' + (tokens.length + 1),
           token: body.token.trim(),
-          active: store.tokens.length === 0, // default true if first
+          active: tokens.length === 0, // default true if first
           info: null,
           lastCheck: null,
           createdAt: new Date().toISOString()
@@ -235,31 +380,31 @@ export default {
           newToken.info = { error: e.message };
         }
 
-        store.tokens.push(newToken);
-        await saveStore(env, store);
+        tokens.push(newToken);
+        await saveTokens(env, tokens);
         return json({ success: true, token: newToken });
       }
 
       if (path.match(/^\/api\/tokens\/([^/]+)\/toggle$/) && request.method === 'POST') {
         const id = path.split('/')[3];
         const store = await getStore(env);
-        store.tokens = (store.tokens || []).map(t => ({
+        const updatedTokens = (store.tokens || []).map(t => ({
           ...t,
           active: t.id === id
         }));
-        await saveStore(env, store);
-        return json({ success: true, tokens: store.tokens });
+        await saveTokens(env, updatedTokens);
+        return json({ success: true, tokens: updatedTokens });
       }
 
       if (path.match(/^\/api\/tokens\/([^/]+)$/) && request.method === 'DELETE') {
         const id = path.split('/')[3];
         const store = await getStore(env);
-        store.tokens = (store.tokens || []).filter(t => t.id !== id);
-        if (store.tokens.length > 0 && !store.tokens.some(t => t.active)) {
-          store.tokens[0].active = true;
+        let updatedTokens = (store.tokens || []).filter(t => t.id !== id);
+        if (updatedTokens.length > 0 && !updatedTokens.some(t => t.active)) {
+          updatedTokens[0].active = true;
         }
-        await saveStore(env, store);
-        return json({ success: true, tokens: store.tokens });
+        await saveTokens(env, updatedTokens);
+        return json({ success: true, tokens: updatedTokens });
       }
 
       if (path.match(/^\/api\/tokens\/([^/]+)\/check$/) && request.method === 'POST') {
@@ -274,14 +419,14 @@ export default {
         const info = await res.json();
         item.info = res.ok ? info : { error: info.meaning || info.message || 'Check failed' };
         item.lastCheck = new Date().toISOString();
-        await saveStore(env, store);
 
+        await saveTokens(env, store.tokens);
         return json({ success: true, token: item });
       }
 
       if (path === '/api/tokens/check-all' && request.method === 'POST') {
         const store = await getStore(env);
-        store.tokens = await Promise.all((store.tokens || []).map(async item => {
+        const updatedTokens = await Promise.all((store.tokens || []).map(async item => {
           try {
             const res = await fetch(`${UPSTREAM_BASE}/api/get_account_info/`, {
               headers: { 'AUTH-TOKEN': item.token }
@@ -296,8 +441,8 @@ export default {
             return { ...item, info: { error: e.message }, lastCheck: new Date().toISOString() };
           }
         }));
-        await saveStore(env, store);
-        return json({ success: true, tokens: store.tokens });
+        await saveTokens(env, updatedTokens);
+        return json({ success: true, tokens: updatedTokens });
       }
 
       // Helper to select auth token for upstream call
@@ -325,7 +470,7 @@ export default {
       // 6. Proxy API: Get fields (brief or full)
       if (path === '/api/pdf417/fields' && request.method === 'GET') {
         const state = url.searchParams.get('state') || 'CA';
-        const type = url.searchParams.get('type') || 'full'; // brief | full
+        const type = url.searchParams.get('type') || 'full';
         const token = await getActiveApiToken(request.headers.get('AUTH-TOKEN'));
         if (!token) return json({ error: 'No active PDF417 API Token available' }, 400);
 
@@ -345,7 +490,6 @@ export default {
         const store = await getStore(env);
         const reqBody = await request.json();
 
-        // Get list of tokens to try: specific selected or active first, then remaining
         const specifiedTokenId = reqBody._tokenId;
         delete reqBody._tokenId;
 
@@ -379,17 +523,15 @@ export default {
             const data = await res.json();
 
             if (res.ok && data.status === 'SUCCESS') {
-              // Update barcode created count if cached
               if (tokItem.info && typeof tokItem.info.barcodes_created === 'number') {
                 tokItem.info.barcodes_created += 1;
                 if (tokItem.info.available_barcodes > 0) tokItem.info.available_barcodes -= 1;
-                await saveStore(env, store);
+                await saveTokens(env, store.tokens);
               }
 
               // Append to history
               try {
-                const history = await getHistory(env);
-                history.unshift({
+                await addHistoryItem(env, {
                   id: 'hist_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 6),
                   createdAt: new Date().toISOString(),
                   tokenId: tokItem.id,
@@ -402,8 +544,6 @@ export default {
                   svgUrl: data.svg || null,
                   rawResponse: data
                 });
-                if (history.length > HISTORY_MAX) history.length = HISTORY_MAX;
-                await saveHistory(env, history);
               } catch (e) {
                 // history failure should not block success response
               }
@@ -414,10 +554,9 @@ export default {
               });
             }
 
-            // If error is limit reached, failover to next token
             if (data.code === 'BARCODE_LIMIT' || data.message === 'BARCODE_LIMIT') {
               lastErr = data;
-              continue; // try next token
+              continue;
             }
 
             return json(data, res.status);
@@ -429,7 +568,7 @@ export default {
         return json(lastErr || { error: 'Failed to generate barcode across all tokens' }, 400);
       }
 
-      // 8. Image Proxy (to fix CORS when viewing SVG/PNG from pdf417.pro media)
+      // 8. Image Proxy (CORS fix)
       if (path === '/api/proxy-image' && request.method === 'GET') {
         const imgUrl = url.searchParams.get('url');
         if (!imgUrl) return json({ error: 'Missing url parameter' }, 400);
@@ -448,7 +587,7 @@ export default {
         });
       }
 
-      // Fallback: serve static assets if ASSETS binding exists (CF Pages / Workers Assets)
+      // Fallback: static assets
       if (env.ASSETS) {
         return env.ASSETS.fetch(request);
       }
