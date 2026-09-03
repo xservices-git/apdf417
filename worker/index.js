@@ -23,35 +23,14 @@ async function getDb(env) {
   if (!db) return null;
 
   if (!globalThis.__D1_INITIALIZED__) {
-    await db.exec(`
-      CREATE TABLE IF NOT EXISTS config (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS tokens (
-        id TEXT PRIMARY KEY,
-        name TEXT NOT NULL,
-        token TEXT NOT NULL,
-        active INTEGER DEFAULT 0,
-        info TEXT,
-        last_check TEXT,
-        created_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS history (
-        id TEXT PRIMARY KEY,
-        created_at TEXT NOT NULL,
-        token_id TEXT,
-        token_name TEXT,
-        state TEXT,
-        barcode_type TEXT,
-        pdf417_meta TEXT,
-        pdf417_data TEXT,
-        png_url TEXT,
-        svg_url TEXT,
-        raw_response TEXT
-      );
-    `);
-    globalThis.__D1_INITIALIZED__ = true;
+    try {
+      await db.prepare("CREATE TABLE IF NOT EXISTS config (key TEXT PRIMARY KEY, value TEXT NOT NULL)").run();
+      await db.prepare("CREATE TABLE IF NOT EXISTS tokens (id TEXT PRIMARY KEY, name TEXT NOT NULL, token TEXT NOT NULL, active INTEGER DEFAULT 0, info TEXT, last_check TEXT, created_at TEXT NOT NULL)").run();
+      await db.prepare("CREATE TABLE IF NOT EXISTS history (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, token_id TEXT, token_name TEXT, state TEXT, barcode_type TEXT, pdf417_meta TEXT, pdf417_data TEXT, png_url TEXT, svg_url TEXT, raw_response TEXT)").run();
+      globalThis.__D1_INITIALIZED__ = true;
+    } catch (e) {
+      console.error('D1 init error:', e);
+    }
   }
   return db;
 }
